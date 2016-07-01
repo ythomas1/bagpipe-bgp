@@ -34,6 +34,7 @@ from bagpipe.bgp.common import logDecorator
 from bagpipe.bgp.common.run_command import runCommand
 
 from bagpipe.bgp.vpn.label_allocator import LabelAllocator
+from bagpipe.bgp.vpn.rd_allocator import RDAllocator
 
 from exabgp.bgp.message.update.attribute.community.extended \
     import RouteTargetASN2Number as RouteTarget
@@ -86,6 +87,9 @@ class VPNManager(LookingGlass):
 
         logging.debug("Creating label allocator")
         self.labelAllocator = LabelAllocator()
+
+        logging.debug("Creating route distinguisher allocator")
+        self.rdAllocator = RDAllocator(self.bgpManager.getLocalAddress())
 
         # dict containing info how an ipvpn is plugged
         # from an evpn  (keys: ipvpn instances)
@@ -269,7 +273,7 @@ class VPNManager(LookingGlass):
     def plugVifToVPN(self, externalInstanceId, instanceType, importRTs,
                      exportRTs, macAddress, ipAddress, gatewayIP,
                      localPort, linuxbr, advertiseSubnet, readvertise,
-                     attractTraffic):
+                     attractTraffic, lbConsistentHashOrder):
 
         # Verify and format IP address with prefix if necessary
         try:
@@ -328,11 +332,11 @@ class VPNManager(LookingGlass):
 
         # Plug VIF to VPN instance
         vpnInstance.vifPlugged(macAddress, ipAddressPrefix, localPort,
-                               advertiseSubnet)
+                               advertiseSubnet, lbConsistentHashOrder)
 
     @logDecorator.logInfo
     def unplugVifFromVPN(self, externalInstanceId, macAddress, ipAddress,
-                         localPort, readvertise):
+                         localPort, readvertise, lbConsistentHashOrder):
 
         # Verify and format IP address with prefix if necessary
         try:
@@ -349,7 +353,8 @@ class VPNManager(LookingGlass):
             raise exc.VPNNotFound(externalInstanceId)
 
         # Unplug VIF from VPN instance
-        vpnInstance.vifUnplugged(macAddress, ipAddressPrefix, readvertise)
+        vpnInstance.vifUnplugged(macAddress, ipAddressPrefix, readvertise,
+                                 lbConsistentHashOrder)
 
         if vpnInstance.type == IPVPN and 'evpn' in localPort:
             self._detach_evpn2ipvpn(vpnInstance)
