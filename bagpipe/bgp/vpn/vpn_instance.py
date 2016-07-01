@@ -52,6 +52,8 @@ from exabgp.bgp.message.open.asn import ASN
 from exabgp.bgp.message.update.attribute.community.extended.communities \
     import ExtendedCommunities
 from exabgp.bgp.message.update.attribute.community.extended \
+    import ConsistentHashSortOrder
+from exabgp.bgp.message.update.attribute.community.extended \
     import TrafficRedirect
 
 from bagpipe.bgp.engine.flowspec import FlowRouteFactory
@@ -294,13 +296,19 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
             "Incoming traffic for %s %d" % (self.instanceType,
                                             self.instanceId))
 
+        self.instanceRD = self.vpnManager.rdAllocator.getNewRD(
+            "Default route distinguisher for %s %d" % (self.instanceType,
+                                                       self.instanceId))
+
         self.localPortData = dict()
 
         # One local port -> List of endpoints (MAC and IP addresses tuple)
         self.localPort2Endpoints = dict()
+        # One endpoint (MAC and IP addresses tuple) -> One route distinguisher
+        self.endpoint2RD = dict()
         # One MAC address -> One local port
         self.macAddress2LocalPortData = dict()
-        # One IP address ->  One MAC address
+        # One IP address ->  Multiple MAC address
         self.ipAddress2MacAddress = dict()
 
         # Redirected instances list from which traffic is attracted (based on
@@ -454,32 +462,34 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
         # FIXME: si DEFAULT + xxx => adv MPLS
         return ecommunities
 
-    def _getRDFromInstanceId(self):
-        return RouteDistinguisher.fromElements(
-            self.bgpManager.getLocalAddress(),
-            self.instanceId)
-
     @abstractmethod
-    def generateVifBGPRoute(self, macAddress, ipPrefix, prefixLen, label):
+    def generateVifBGPRoute(self, macAddress, ipPrefix, prefixLen, label, rd):
         '''
         returns a RouteEntry
         '''
         pass
 
-    def synthesizeVifBGPRoute(self, macAddress, ipPrefix, prefixLen, label):
+    def synthesizeVifBGPRoute(self, macAddress, ipPrefix, prefixLen, label,
+                              lbConsistentHashOrder,
+                              routeDistinguisher=None):
+        rd = routeDistinguisher if routeDistinguisher else self.instanceRD
         routeEntry = self.generateVifBGPRoute(macAddress, ipPrefix, prefixLen,
-                                              label)
+                                              label, rd)
         assert(isinstance(routeEntry, RouteEntry))
 
         routeEntry.attributes.add(self._genEncapExtendedCommunities())
         routeEntry.setRouteTargets(self.exportRTs)
+
+        ecommunities = ExtendedCommunities()
+        ecommunities.communities.append(ConsistentHashSortOrder(lbConsistentHashOrder))
+        routeEntry.attributes.add(ecommunities)
 
         self.log.debug("Synthesized Vif route entry: %s", routeEntry)
         return routeEntry
 
     def synthesizeRedirectBGPRoute(self, rules):
         self.log.info("synthesizeRedirectBGPRoute called for rules %s", rules)
-        nlri = FlowRouteFactory(self.afi, self._getRDFromInstanceId())
+        nlri = FlowRouteFactory(self.afi, self.instanceRD)
         for rule in rules:
             nlri.add(rule)
 
@@ -505,7 +515,8 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
     @utils.synchronized
     @logDecorator.logInfo
     def vifPlugged(self, macAddress, ipAddressPrefix, localPort,
-                   advertiseSubnet=False):
+                   advertiseSubnet=False,
+                   lbConsistentHashOrder=0):
         # Check if this port has already been plugged
         # - Verify port informations consistency
         if macAddress in self.macAddress2LocalPortData:
@@ -521,19 +532,22 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
                                                    portData.get("port_info"),
                                                    localPort))
 
-        # - Verify (MAC address, IP address) tuple consistency
-        if ipAddressPrefix in self.ipAddress2MacAddress:
-            if self.ipAddress2MacAddress.get(ipAddressPrefix) != macAddress:
-                raise APIException("Inconsistent endpoint info: %s already "
-                                   "bound to a MAC address different from %s" %
-                                   (ipAddressPrefix, macAddress))
-            else:
-                return
-
-        # Else, plug port on dataplane
         try:
             # Parse address/mask
             (ipPrefix, prefixLen) = self._parseIPAddressPrefix(ipAddressPrefix)
+
+            if not advertiseSubnet and prefixLen != 32:
+                self.log.debug("Using /32 instead of /%d", prefixLen)
+                prefixLen = 32
+
+            # - Verify (MAC address, IP address) tuple consistency
+            if ipAddressPrefix in self.ipAddress2MacAddress and prefixLen == 32:
+                if macAddress not in self.ipAddress2MacAddress[ipAddressPrefix]:
+                    raise APIException("Inconsistent endpoint info: %s already "
+                                       "bound to a MAC address different from %s" %
+                                       (ipAddressPrefix, macAddress))
+                else:
+                    return
 
             self.log.debug("Plugging port (%s)", ipPrefix)
 
@@ -545,21 +559,29 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
                      macAddress, ipAddressPrefix)
                 )
                 portData["port_info"] = localPort
+                portData["lbConsistentHashOrder"] = lbConsistentHashOrder
+
+            endpoint_rd = self.vpnManager.rdAllocator.getNewRD(
+                "Route distinguisher for %s %d, interface %s, "
+                "endpoint %s/%s" % (self.instanceType, self.instanceId,
+                                    localPort['linuxif'], macAddress,
+                                    ipAddressPrefix)
+            )
+
+            rd = self.instanceRD if prefixLen == 32 else endpoint_rd
 
             # Call driver to setup the dataplane for incoming traffic
             self.dataplane.vifPlugged(macAddress, ipPrefix,
                                       localPort, portData['label'])
-
-            if not advertiseSubnet and prefixLen != 32:
-                self.log.debug("Using /32 instead of /%d", prefixLen)
-                prefixLen = 32
 
             self.log.info("Synthesizing and advertising BGP route for VIF %s "
                           "endpoint (%s, %s/%d)", localPort['linuxif'],
                           macAddress, ipPrefix, prefixLen)
             routeEntry = self.synthesizeVifBGPRoute(macAddress,
                                                     ipPrefix, prefixLen,
-                                                    portData['label'])
+                                                    portData['label'],
+                                                    lbConsistentHashOrder,
+                                                    rd)
 
             self._advertiseRoute(routeEntry)
 
@@ -567,39 +589,47 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
                 self.localPort2Endpoints[localPort['linuxif']] = list()
 
             self.localPort2Endpoints[localPort['linuxif']].append(
-                {'mac': macAddress, 'ip': ipAddressPrefix,
+                {'mac': macAddress, 'ip': ipAddressPrefix
                  # FIXME: maybe add prefix len for the LG
                  }
             )
+            self.endpoint2RD[(macAddress, ipAddressPrefix)] = endpoint_rd
             self.macAddress2LocalPortData[macAddress] = portData
-            self.ipAddress2MacAddress[ipAddressPrefix] = macAddress
+
+            if ipAddressPrefix not in self.ipAddress2MacAddress:
+                self.ipAddress2MacAddress[ipAddressPrefix] = list()
+
+            self.ipAddress2MacAddress[ipAddressPrefix].append(macAddress)
 
         except Exception as e:
             self.log.error("Error in vifPlugged: %s", e)
             if localPort['linuxif'] in self.localPort2Endpoints:
                 if len(self.localPort2Endpoints[localPort['linuxif']]) > 1:
-                    self.localPort2Endpoints[localPort['linuxif']].remove(
-                        {'mac': macAddress, 'ip': ipAddressPrefix}
-                    )
+                    endpoint = {'mac': macAddress, 'ip': ipAddressPrefix}
+                    if endpoint in self.localPort2Endpoints[localPort['linuxif']]:
+                        self.localPort2Endpoints[localPort['linuxif']].remove(
+                            endpoint
+                        )
                 else:
                     del self.localPort2Endpoints[localPort['linuxif']]
             if macAddress in self.macAddress2LocalPortData:
                 del self.macAddress2LocalPortData[macAddress]
             if ipAddressPrefix in self.ipAddress2MacAddress:
-                del self.ipAddress2MacAddress[ipAddressPrefix]
+                self.ipAddress2MacAddress[ipAddressPrefix].remove(macAddress)
 
             raise
 
         self.log.info("localPort2Endpoints: %s", self.localPort2Endpoints)
+        self.log.info("endpoint2RD: %s", self.endpoint2RD)
         self.log.info("macAddress2LocalPortData: %s",
                       self.macAddress2LocalPortData)
         self.log.info("ipAddress2MacAddress: %s", self.ipAddress2MacAddress)
 
-
     @utils.synchronized
     @logDecorator.logInfo
     def vifUnplugged(self, macAddress, ipAddressPrefix,
-                     advertiseSubnet=False):
+                     advertiseSubnet=False,
+                     lbConsistentHashOrder=0):
         # Verify port and endpoint (MAC address, IP address) tuple consistency
         portData = self.macAddress2LocalPortData.get(macAddress)
         if (not portData or
@@ -613,6 +643,7 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
 
         # Finding label and local port informations
         label = portData.get('label')
+        endpoint_rd = self.endpoint2RD[(macAddress, ipAddressPrefix)]
         localPort = portData.get('port_info')
         if (not label or not localPort):
             self.log.error("vifUnplugged called for endpoint (%s, %s), but "
@@ -631,12 +662,16 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
                 self.log.debug("Using /32 instead of /%d", prefixLen)
                 prefixLen = 32
 
+            rd = self.instanceRD if prefixLen == 32 else endpoint_rd
+
             self.log.info("Synthesizing and withdrawing BGP route for VIF %s "
                           "endpoint (%s, %s/%d)", localPort['linuxif'],
                           macAddress, ipPrefix, prefixLen)
             routeEntry = self.synthesizeVifBGPRoute(macAddress,
                                                     ipPrefix, prefixLen,
-                                                    label)
+                                                    label,
+                                                    lbConsistentHashOrder,
+                                                    rd)
             self._withdrawRoute(routeEntry)
 
             # Unplug endpoint from data plane
@@ -655,6 +690,10 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
                     {'mac': macAddress, 'ip': ipAddressPrefix}
                 )
 
+            del self.endpoint2RD[(macAddress, ipAddressPrefix)]
+            # Free route distinguisher to the allocator
+            self.vpnManager.rdAllocator.release(endpoint_rd)
+
             if not lastEndpoint:
                 if not any([endpoint['mac'] == macAddress for endpoint
                             in self.localPort2Endpoints[localPort['linuxif']]]
@@ -663,7 +702,10 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
             else:
                 del self.macAddress2LocalPortData[macAddress]
 
-            del self.ipAddress2MacAddress[ipAddressPrefix]
+            self.ipAddress2MacAddress[ipAddressPrefix].remove(macAddress)
+
+            if not self.ipAddress2MacAddress[ipAddressPrefix]:
+                del self.ipAddress2MacAddress[ipAddressPrefix]
         else:
             self.log.error("vifUnplugged called for endpoint {%s, %s}, but"
                            " port data is incomplete", macAddress,
@@ -805,7 +847,8 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
                     'label':
                     self.macAddress2LocalPortData[endpoint['mac']]['label'],
                     'macAddress': endpoint['mac'],
-                    'ipAddress': endpoint['ip']
+                    'ipAddress': endpoint['ip'],
+                    'rd': repr(self.endpoint2RD[(endpoint['mac'], endpoint['ip'])])
                 })
 
             r[port] = {
