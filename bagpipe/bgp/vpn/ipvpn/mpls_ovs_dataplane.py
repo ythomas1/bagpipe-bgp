@@ -569,7 +569,7 @@ class MPLSOVSVRFDataplane(VPNInstanceDataplane, LookingGlass):
                 else '')
 
     def _getLBFlowsFileName(self, action, prefix):
-        return ('/var/tmp/%s_vrf_%d_lb_flows_%s.txt' %
+        return ('/tmp/%s_vrf_%d_lb_flows_%s.txt' %
                 (action, self.instanceId, prefix.replace("/", "_")))
 
     def _deleteLBFlowsFile(self, file_name):
@@ -673,7 +673,7 @@ class MPLSOVSVRFDataplane(VPNInstanceDataplane, LookingGlass):
 
         self.driver._ovs_flows_from_file(lb_flows_file_name)
 
-#        self._deleteLBFlowsFile(lb_flows_file_name)
+        self._deleteLBFlowsFile(lb_flows_file_name)
 
     @logDecorator.logInfo
     def removeDataplaneForRemoteEndpoint(self, prefix, remotePE, label, nlri,
@@ -710,7 +710,7 @@ class MPLSOVSVRFDataplane(VPNInstanceDataplane, LookingGlass):
 
                 del self._loadBalancingEndpoints[prefix]
 
-#            self._deleteLBFlowsFile(lb_flows_file_name)
+            self._deleteLBFlowsFile(lb_flows_file_name)
 
         # Unmap traffic to remote IP address
 #         self._ovs_flow_del('ip,in_port=%s%s' % (self.patchPortInNumber,
