@@ -52,6 +52,8 @@ from exabgp.bgp.message.update import Attribute
 from exabgp.bgp.message.update.nlri.flow import Flow
 from exabgp.bgp.message.update.attribute.community.extended \
     import TrafficRedirect
+from exabgp.bgp.message.update.attribute.community.extended \
+    import ConsistentHashSortOrder
 
 IPVPN = "ipvpn"
 
@@ -84,9 +86,8 @@ class VRF(VPNInstance, LookingGlass):
         return IPVPNRouteFactory(self.afi, prefix, label, rd,
                                  self.dataplaneDriver.getLocalAddress())
 
-    def generateVifBGPRoute(self, macAdress, ipPrefix, prefixLen, label):
+    def generateVifBGPRoute(self, macAdress, ipPrefix, prefixLen, label, rd):
         # Generate BGP route and advertise it...
-        rd = self._getRDFromInstanceId()
         nlri = self._nlriFrom("%s/%s" % (ipPrefix, prefixLen), label, rd)
 
         return RouteEntry(nlri)
@@ -94,12 +95,6 @@ class VRF(VPNInstance, LookingGlass):
     def _getLocalLabels(self):
         for portData in self.macAddress2LocalPortData.itervalues():
             yield portData['label']
-
-    def _getRDFromLabel(self, label):
-        # FIXME: this is a crude hack that will break beyond 10000 VRFs
-        return RouteDistinguisher.fromElements(
-            self.bgpManager.getLocalAddress(),
-            10000+label)
 
     def _imported(self, route):
         return (len(set(route.routeTargets).intersection(
@@ -132,10 +127,11 @@ class VRF(VPNInstance, LookingGlass):
         return (len(set(route.routeTargets).intersection(
                     set(self.readvertiseFromRTs))) > 0)
 
-    def _routeForReAdvertisement(self, route, label, doDefault=False):
+    def _routeForReAdvertisement(self, route, label, rd, lbConsistentHashOrder,
+                                 doDefault=False):
         prefix = "0.0.0.0/0" if doDefault else route.nlri.cidr.prefix()
-        nlri = self._nlriFrom(prefix, label,
-                              self._getRDFromLabel(label))
+
+        nlri = self._nlriFrom(prefix, label, rd)
 
         attributes = Attributes()
 
@@ -148,6 +144,7 @@ class VRF(VPNInstance, LookingGlass):
 
         eComs = self._genEncapExtendedCommunities()
         eComs.communities += finalRTRecords
+        eComs.communities.append(ConsistentHashSortOrder(lbConsistentHashOrder))
         attributes.add(eComs)
 
         entry = RouteEntry(nlri, self.readvertiseToRTs, attributes)
@@ -166,40 +163,47 @@ class VRF(VPNInstance, LookingGlass):
 
         return self.synthesizeRedirectBGPRoute(rules)
 
-    def _advertiseRouteOrDefault(self, route, label):
+    def _advertiseRouteOrDefault(self, route, label, rd,
+                                 lbConsistentHashOrder=0):
         if self.attractTraffic:
-            if len(self.readvertised) == 0:
-                self.log.debug("Advertising default route from VRF to "
-                               "redirection VRF")
-                routeEntry = self._routeForReAdvertisement(route, label,
-                                                           doDefault=True)
-                self._advertiseRoute(routeEntry)
-        else:
-            routeEntry = self._routeForReAdvertisement(route, label)
-            self._advertiseRoute(routeEntry)
+            self.log.debug("Advertising default route from VRF %d to "
+                           "redirection VRF", self.instanceId)
 
-    def _withdrawRouteOrDefault(self, route, label):
+        routeEntry = self._routeForReAdvertisement(
+            route, label, rd, lbConsistentHashOrder,
+            doDefault=self.attractTraffic
+        )
+        self._advertiseRoute(routeEntry)
+
+    def _withdrawRouteOrDefault(self, route, label, rd,
+                                lbConsistentHashOrder=0):
         if self.attractTraffic:
-            if len(self.readvertised) == 1:
-                self.log.debug("Stop advertising default route from VRF to "
-                               "redirection VRF")
-                routeEntry = self._routeForReAdvertisement(route, label,
-                                                           doDefault=True)
-                self._withdrawRoute(routeEntry)
-        else:
-            routeEntry = self._routeForReAdvertisement(route, label)
-            self._withdrawRoute(routeEntry)
+            self.log.debug("Stop advertising default route from VRF to "
+                           "redirection VRF")
+
+        routeEntry = self._routeForReAdvertisement(
+            route, label, rd, lbConsistentHashOrder,
+            doDefault=self.attractTraffic
+        )
+        self._withdrawRoute(routeEntry)
 
     @logDecorator.log
     def _readvertise(self, route):
         nlri = route.nlri
 
         self.log.debug("Start re-advertising %s from VRF", nlri.cidr.prefix())
-        for label in self._getLocalLabels():
-            self.log.debug("Start re-advertising %s from VRF, with label %s",
-                           nlri, label)
-            # need a distinct RD for each route...
-            self._advertiseRouteOrDefault(route, label)
+        for localPort, endpoints in self.localPort2Endpoints.iteritems():
+            for endpoint in endpoints:
+                portData = self.macAddress2LocalPortData[endpoint['mac']]
+                label = portData['label']
+                lbConsistentHashOrder = portData['lbConsistentHashOrder']
+                rd = self.endpoint2RD[(endpoint['mac'], endpoint['ip'])]
+                self.log.debug("Start re-advertising %s from VRF, with label "
+                               "%s and route distinguisher %s",
+                               nlri, label, rd)
+                # need a distinct RD for each route...
+                self._advertiseRouteOrDefault(route, label, rd,
+                                              lbConsistentHashOrder)
 
         self.readvertised.add(route)
 
@@ -208,33 +212,44 @@ class VRF(VPNInstance, LookingGlass):
         nlri = route.nlri
 
         self.log.debug("Stop re-advertising %s from VRF", nlri.cidr.prefix())
-        for label in self._getLocalLabels():
-            self.log.debug("Stop re-advertising %s from VRF, with label %s",
-                           nlri, label)
-            self._withdrawRouteOrDefault(route, label)
+        for localPort, endpoints in self.localPort2Endpoints.iteritems():
+            for endpoint in endpoints:
+                portData = self.macAddress2LocalPortData[endpoint['mac']]
+                label = portData['label']
+                lbConsistentHashOrder = portData['lbConsistentHashOrder']
+                rd = self.endpoint2RD[(endpoint['mac'], endpoint['ip'])]
+                self.log.debug("Stop re-advertising %s from VRF, with label "
+                               "%s and route distinguisher %s",
+                               nlri, label, rd)
+                self._withdrawRouteOrDefault(route, label, rd,
+                                             lbConsistentHashOrder)
 
         self.readvertised.remove(route)
 
     def vifPlugged(self, macAddress, ipAddressPrefix, localPort,
-                   advertiseSubnet):
+                   advertiseSubnet, lbConsistentHashOrder):
         VPNInstance.vifPlugged(self, macAddress, ipAddressPrefix, localPort,
-                               advertiseSubnet)
+                               advertiseSubnet, lbConsistentHashOrder)
 
         label = self.macAddress2LocalPortData[macAddress]['label']
+        rd = self.endpoint2RD[(macAddress, ipAddressPrefix)]
         for route in self.readvertised:
             self.log.debug("Re-advertising %s with this port as next hop",
                            route.nlri)
-            self._advertiseRouteOrDefault(route, label)
+            self._advertiseRouteOrDefault(route, label, rd,
+                                          lbConsistentHashOrder)
 
-    def vifUnplugged(self, macAddress, ipAddressPrefix, advertiseSubnet):
+    def vifUnplugged(self, macAddress, ipAddressPrefix, advertiseSubnet,
+                     lbConsistentHashOrder):
         label = self.macAddress2LocalPortData[macAddress]['label']
+        rd = self.endpoint2RD[(macAddress, ipAddressPrefix)]
         for route in self.readvertised:
             self.log.debug("Stop re-advertising %s with this port as next hop",
                            route.nlri)
-            self._withdrawRouteOrDefault(route, label)
+            self._withdrawRouteOrDefault(route, label, rd)
 
         VPNInstance.vifUnplugged(self, macAddress, ipAddressPrefix,
-                                 advertiseSubnet)
+                                 advertiseSubnet, lbConsistentHashOrder)
 
     # Callbacks for BGP route updates (TrackerWorker) ########################
 
@@ -295,9 +310,15 @@ class VRF(VPNInstance, LookingGlass):
 
             assert(len(newRoute.nlri.labels.labels) == 1)
 
+            lbConsistentHashOrder = 0
+            if newRoute.extendedCommunities(ConsistentHashSortOrder):
+                lbConsistentHashOrder = newRoute.extendedCommunities(
+                    ConsistentHashSortOrder)[0].order
+
             self.dataplane.setupDataplaneForRemoteEndpoint(
                 prefix, newRoute.nexthop,
-                newRoute.nlri.labels.labels[0], newRoute.nlri, encaps)
+                newRoute.nlri.labels.labels[0], newRoute.nlri, encaps,
+                lbConsistentHashOrder)
 
     @utils.synchronized
     @logDecorator.log
@@ -346,11 +367,21 @@ class VRF(VPNInstance, LookingGlass):
                                "dataplane does not want it")
                 return
 
+            encaps = self._checkEncaps(oldRoute)
+            if not encaps:
+                return
+
             assert(len(oldRoute.nlri.labels.labels) == 1)
+
+            lbConsistentHashOrder = 0
+            if oldRoute.extendedCommunities(ConsistentHashSortOrder):
+                lbConsistentHashOrder = oldRoute.extendedCommunities(
+                    ConsistentHashSortOrder)[0].order
 
             self.dataplane.removeDataplaneForRemoteEndpoint(
                 prefix, oldRoute.nexthop,
-                oldRoute.nlri.labels.labels[0], oldRoute.nlri)
+                oldRoute.nlri.labels.labels[0], oldRoute.nlri, encaps,
+                lbConsistentHashOrder)
 
     ### Looking glass ###
 
