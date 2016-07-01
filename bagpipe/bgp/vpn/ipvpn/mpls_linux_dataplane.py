@@ -300,7 +300,7 @@ class MPLSLinuxVRFDataplane(VPNInstanceDataplane, LookingGlass):
 
     @logDecorator.logInfo
     def setupDataplaneForRemoteEndpoint(self, prefix, remotePE, label, nlri,
-                                        encaps):
+                                        encaps, lbConsistentHashOrder=0):
         prefix = str(prefix)
         try:
             with self._getRoute(prefix) as r:
@@ -316,7 +316,8 @@ class MPLSLinuxVRFDataplane(VPNInstanceDataplane, LookingGlass):
             self.add_route(req)
 
     @logDecorator.logInfo
-    def removeDataplaneForRemoteEndpoint(self, prefix, remotePE, label, nlri):
+    def removeDataplaneForRemoteEndpoint(self, prefix, remotePE, label, nlri,
+                                         encaps, lbConsistentHashOrder=0):
         prefix = str(prefix)
         try:
             with self._getRoute(prefix) as r:
