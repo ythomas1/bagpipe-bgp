@@ -632,8 +632,8 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
                      lbConsistentHashOrder=0):
         # Verify port and endpoint (MAC address, IP address) tuple consistency
         portData = self.macAddress2LocalPortData.get(macAddress)
-        if (not portData or
-                self.ipAddress2MacAddress.get(ipAddressPrefix) != macAddress):
+        if (not portData or (ipAddressPrefix in self.ipAddress2MacAddress and
+                macAddress not in self.ipAddress2MacAddress[ipAddressPrefix])):
             self.log.error("vifUnplugged called for endpoint (%s, %s), but no "
                            "consistent informations or was not plugged yet",
                            macAddress, ipAddressPrefix)
