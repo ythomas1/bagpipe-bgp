@@ -624,20 +624,20 @@ class MPLSOVSVRFDataplane(VPNInstanceDataplane, LookingGlass):
             )
             self.log.info('Multipath flow: %s', lb_multipath_flow)
             if len(self._loadBalancingEndpoints[prefix]) > 1:
-                lb_multipath_op = 'modify'
+                lb_multipath_op = 'modify_strict'
             else:
                 lb_multipath_op = 'add'
-#         else:
-#             lb_multipath_flow = (
-#                 self._ovs_flow_del('ip,in_port=%s%s' % (self.patchPortInNumber,
-#                                                         nw_dst_match),
-#                                    self.driver.ovs_table_vrfs, True)
-#             )
-#
-#             lb_multipath_op = 'del'
+        else:
+            lb_multipath_flow = (
+                self._ovs_flow_del('ip,in_port=%s%s' % (self.patchPortInNumber,
+                                                        nw_dst_match),
+                                   self.driver.ovs_table_vrfs, True)
+            )
 
-            lb_flows_file.write('%s %s\n' % (lb_multipath_op,
-                                             lb_multipath_flow))
+            lb_multipath_op = 'delete_strict'
+
+        lb_flows_file.write('%s %s\n' % (lb_multipath_op,
+                                         lb_multipath_flow))
 
     @logDecorator.logInfo
     def setupDataplaneForRemoteEndpoint(self, prefix, remotePE, label, nlri,
@@ -699,16 +699,12 @@ class MPLSOVSVRFDataplane(VPNInstanceDataplane, LookingGlass):
 
             if self._loadBalancingEndpoints[prefix]:
                 self._writeLBAddFlows2File(lb_flows_file, prefix, nw_dst_match)
-
-                lb_flows_file.close()
-
-                self.driver._ovs_flows_from_file(lb_flows_file_name)
             else:
-                lb_flows_file.close()
-
-                self.driver._ovs_flows_from_file(lb_flows_file_name)
-
                 del self._loadBalancingEndpoints[prefix]
+
+            lb_flows_file.close()
+
+            self.driver._ovs_flows_from_file(lb_flows_file_name)
 
             self._deleteLBFlowsFile(lb_flows_file_name)
 
@@ -1029,6 +1025,8 @@ class MPLSOVSDataplaneDriver(DataplaneDriver, LookingGlass):
                                    self.ovs_table_incoming)
             self._ovs_flow_del('ip', self.ovs_table_vrfs)
             self._ovs_flow_del('arp', self.ovs_table_vrfs)
+
+            self._ovs_flow_del('ip', self.ovs_table_vrfs_lb)
             if self.log.debug:
                 self.log.debug("All our rules have been flushed")
                 self._runCommand("ovs-ofctl dump-flows %s" % self.bridge)
