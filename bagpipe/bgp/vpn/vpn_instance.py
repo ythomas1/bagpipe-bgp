@@ -230,7 +230,7 @@ class TrafficClassifier(object):
 
         if self.protocol:
             rules.append(FlowIPProtocol(NumericOperator.EQ,
-                                        Protocol.codes[self.protocol]))
+                                        Protocol.named(self.protocol)))
 
         return rules
 
@@ -249,6 +249,7 @@ class TrafficClassifier(object):
 class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
     __metaclass__ = ABCMeta
 
+    type = None
     afi = None
     safi = None
 
@@ -265,6 +266,8 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
         Thread.__init__(self)
         self.setDaemon(True)
 
+        # FIXME: à mettre dans self.AFISAFI2compareRoute
+        #  # avoir à la place d'une valeur un dict (afi,safi) -> valeur
         if dataplaneDriver.ecmpSupport:
             compareRoutes = compareECMP
         else:
@@ -391,6 +394,10 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
 
     def hasEnpoint(self, linuxif):
         return (self.localPort2Endpoints.get(linuxif) is not None)
+
+    def hasOnlyOneEnpoint(self):
+        return (len(self.localPort2Endpoints) == 1 and
+                len(self.localPort2Endpoints.values()[0]) == 1)
 
     @logDecorator.log
     def updateRouteTargets(self, newImportRTs, newExportRTs):
@@ -736,10 +743,17 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
         return False
 
     @logDecorator.log
-    def redirectTraffic(self, redirectRT, rules, redirectPort):
-        self.log.debug("Redirect traffic to VPN instance importing route "
-                       "target %s based on rules %s and port %s", redirectRT,
-                       rules, redirectPort)
+    def startRedirectTraffic(self, redirectRT, rules):
+        self.log.debug("Start redirecting traffic to VPN instance importing "
+                       "route target %s based on rules %s", redirectRT, rules)
+        # Create redirection instance if first FlowSpec route for this
+        # redirect route target
+        redirectInstance = self.vpnManager.redirectTrafficToVPN(
+            self.externalInstanceId, self.type, redirectRT
+        )
+        redirectPort = redirectInstance.dataplane.getRedirectPort()
+
+        # Create traffic classifier from FlowSpec rules
         classifier = TrafficClassifier()
         classifier.mapRedirectRules2TrafficClassifier(rules)
 
@@ -749,23 +763,33 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
         if not hasattr(self, 'redirectRT2classifiers'):
             # One redirect route target -> Multiple traffic classifiers (One
             # per prefix)
+            # Can be inverted to one traffic classifier -> Multiple redirect
+            # route targets
             self.redirectRT2classifiers = defaultdict(set)
 
         self.redirectRT2classifiers[redirectRT].add(classifier)
 
     @logDecorator.log
     def stopRedirectTraffic(self, redirectRT, rules):
-        self.log.debug("Stop redirect traffic to VPN instance importing route "
-                       "target %s based on rules %s", redirectRT, rules)
+        self.log.debug("Stop redirecting traffic to VPN instance importing "
+                       "route target %s based on rules %s", redirectRT, rules)
+        # Create traffic classifier from FlowSpec rule
         classifier = TrafficClassifier()
         classifier.mapRedirectRules2TrafficClassifier(rules)
 
         if (redirectRT in self.redirectRT2classifiers and
                 classifier in self.redirectRT2classifiers[redirectRT]):
-            self.dataplane.removeDataplaneForTrafficClassifier(classifier)
             self.redirectRT2classifiers[redirectRT].remove(classifier)
 
+            if not utils.invert_dict_of_sets(
+                    self.redirectRT2classifiers)[classifier]:
+                self.dataplane.removeDataplaneForTrafficClassifier(
+                    classifier)
+
             if not self.redirectRT2classifiers[redirectRT]:
+                self.vpnManager.stopRedirectTrafficToVPN(
+                    self.externalInstanceId, self.type, redirectRT
+                )
                 del self.redirectRT2classifiers[redirectRT]
         else:
             self.log.error("stopRedirectTraffic called for redirect route "
