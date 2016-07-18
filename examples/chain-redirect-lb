@@ -173,6 +173,21 @@ r_b bagpipe-looking-glass vpns instances x2 dataplane flows
 r_b bagpipe-looking-glass vpns instances redirect-to-ipvpn-64512_400 dataplane flows
 r_b bagpipe-looking-glass vpns instances net2vm2 dataplane flows
 
+
+r_b bagpipe-rest-attach --detach --port netns:to-svm1-x1 --network-type ipvpn --vpn-instance-id x1 --ip 100.0.0.1/24 --netns svm1 --if2vpn x1
+r_b bagpipe-rest-attach --detach --port to-svm1-h0 --mac 52:54:00:99:99:99 --network-type ipvpn --vpn-instance-id h01 --ip 0.0.0.0/0 --advertise-subnet
+r_b bagpipe-rest-attach --detach --port netns:to-svm1-h0 --mac 52:54:00:99:99:99 --network-type ipvpn --vpn-instance-id h01 --ip 30.0.0.1/24 --netns svm1 --if2vpn h0
+
+r_a bagpipe-rest-attach --detach --port to-svm20-h0 --mac 52:54:20:99:99:99 --network-type ipvpn --vpn-instance-id h02 --ip 0.0.0.0/0 --advertise-subnet \
+	--lb-consistent-hash-order 0
+r_a bagpipe-rest-attach --detach --port netns:to-svm20-h0 --mac 52:54:20:99:99:99 --network-type ipvpn --vpn-instance-id h02 --ip 40.0.0.1/24 --netns svm20 --if2vpn h0
+r_a bagpipe-rest-attach --detach --port netns:to-svm20-x2 --network-type ipvpn --vpn-instance-id x2 --ip 200.0.0.1/24 --netns svm20 --if2vpn x2
+
+r_b bagpipe-rest-attach --detach --port to-svm21-h0 --mac 52:54:21:99:99:99 --network-type ipvpn --vpn-instance-id h02 --ip 0.0.0.0/0 --advertise-subnet \
+	--lb-consistent-hash-order 1
+r_b bagpipe-rest-attach --detach --port netns:to-svm21-h0 --mac 52:54:21:99:99:99 --network-type ipvpn --vpn-instance-id h02 --ip 40.0.0.2/24 --netns svm21 --if2vpn h0
+r_b bagpipe-rest-attach --detach --port netns:to-svm21-x2 --network-type ipvpn --vpn-instance-id x2 --ip 200.0.0.2/24 --netns svm21 --if2vpn x2
+
 r_both bagpipe-looking-glass logs
 
 clean_stop
