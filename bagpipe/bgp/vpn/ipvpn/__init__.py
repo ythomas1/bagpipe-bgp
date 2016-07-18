@@ -27,6 +27,7 @@ from bagpipe.bgp.vpn.vpn_instance import VPNInstance, TrafficClassifier
 from bagpipe.bgp.engine import RouteEvent
 from bagpipe.bgp.engine import RouteEntry
 
+from bagpipe.bgp.engine.flowspec import Flow
 from bagpipe.bgp.engine.ipvpn import IPVPN as IPVPNNlri
 from bagpipe.bgp.engine.ipvpn import IPVPNRouteFactory
 
@@ -38,6 +39,7 @@ from bagpipe.bgp.common.looking_glass import LookingGlass, LGMap
 from exabgp.bgp.message.update import Attributes
 from exabgp.bgp.message.update.nlri.qualifier.rd import RouteDistinguisher
 from exabgp.bgp.message.update.attribute.attribute import Attribute
+from _collections import defaultdict
 from exabgp.bgp.message.update.attribute.community.extended.communities \
     import ExtendedCommunities
 from exabgp.bgp.message.update.attribute.community.extended.rt \
@@ -49,7 +51,6 @@ from exabgp.reactor.protocol import AFI
 from exabgp.reactor.protocol import SAFI
 
 from exabgp.bgp.message.update import Attribute
-from exabgp.bgp.message.update.nlri.flow import Flow
 from exabgp.bgp.message.update.attribute.community.extended \
     import TrafficRedirect
 from exabgp.bgp.message.update.attribute.community.extended \
@@ -78,7 +79,6 @@ class VRF(VPNInstance, LookingGlass):
     def __init__(self, *args, **kwargs):
         VPNInstance.__init__(self, *args, **kwargs)
         self.readvertised = set()
-        self.redirectRT2flowNLRIs = dict()
 
     def _nlriFrom(self, prefix, label, rd):
         assert(rd is not None)
@@ -205,6 +205,10 @@ class VRF(VPNInstance, LookingGlass):
                 self._advertiseRouteOrDefault(route, label, rd,
                                               lbConsistentHashOrder)
 
+        if self.attractTraffic and self.hasOnlyOneEnpoint():
+            flowEntry = self._routeForRedirectPrefix(nlri.cidr.prefix())
+            self._advertiseRoute(flowEntry)
+
         self.readvertised.add(route)
 
     @logDecorator.log
@@ -224,6 +228,10 @@ class VRF(VPNInstance, LookingGlass):
                 self._withdrawRouteOrDefault(route, label, rd,
                                              lbConsistentHashOrder)
 
+        if self.attractTraffic and self.hasOnlyOneEnpoint():
+            flowEntry = self._routeForRedirectPrefix(nlri.cidr.prefix())
+            self._withdrawRoute(flowEntry)
+
         self.readvertised.remove(route)
 
     def vifPlugged(self, macAddress, ipAddressPrefix, localPort,
@@ -239,6 +247,10 @@ class VRF(VPNInstance, LookingGlass):
             self._advertiseRouteOrDefault(route, label, rd,
                                           lbConsistentHashOrder)
 
+            if self.attractTraffic and self.hasOnlyOneEnpoint():
+                flowEntry = self._routeForRedirectPrefix(route.nlri.cidr.prefix())
+                self._advertiseRoute(flowEntry)
+
     def vifUnplugged(self, macAddress, ipAddressPrefix, advertiseSubnet,
                      lbConsistentHashOrder):
         label = self.macAddress2LocalPortData[macAddress]['label']
@@ -247,6 +259,10 @@ class VRF(VPNInstance, LookingGlass):
             self.log.debug("Stop re-advertising %s with this port as next hop",
                            route.nlri)
             self._withdrawRouteOrDefault(route, label, rd)
+
+            if self.attractTraffic and self.hasOnlyOneEnpoint():
+                flowEntry = self._routeForRedirectPrefix(route.nlri.cidr.prefix())
+                self._withdrawRoute(flowEntry)
 
         VPNInstance.vifUnplugged(self, macAddress, ipAddressPrefix,
                                  advertiseSubnet, lbConsistentHashOrder)
@@ -257,7 +273,7 @@ class VRF(VPNInstance, LookingGlass):
         if isinstance(route.nlri, IPVPNNlri):
             return route.nlri.cidr.prefix()
         elif isinstance(route.nlri, Flow):
-            return (Flow, route.nlri)
+            return (Flow, route.nlri.ordered_rules_str())
         else:
             self.log.error("We should not receive routes of type %s",
                            type(route.nlri))
@@ -267,26 +283,22 @@ class VRF(VPNInstance, LookingGlass):
     @logDecorator.log
     def _newBestRoute(self, entry, newRoute):
 
-        prefix = entry
-
         if isinstance(newRoute.nlri, Flow):
-            #FIXME: check if there are multiple redirect RT
-            for ecom in newRoute.extendedCommunities(TrafficRedirect):
-                redirectRT = "%s:%s" % (ecom.asn, ecom.target)
-                # Create redirection instance if first FlowSpec route for this
-                # redirect route target
-                redirectInstance = self.vpnManager.redirectTrafficToVPN(
-                    self.externalInstanceId, self.type, redirectRT
-                )
-                redirectPort = redirectInstance.dataplane.getRedirectPort()
-                self.redirectTraffic(redirectRT, newRoute.nlri.rules,
-                                     redirectPort)
+            rule = entry
 
-                if redirectRT not in self.redirectRT2flowNLRIs:
-                    self.redirectRT2flowNLRIs[redirectRT] = set([newRoute.nlri])
-                else:
-                    self.redirectRT2flowNLRIs[redirectRT].add(newRoute.nlri)
+            if len(newRoute.extendedCommunities(TrafficRedirect)) == 1:
+                trafficRedirect = newRoute.extendedCommunities(TrafficRedirect)
+                redirectRT = "%s:%s" % (trafficRedirect[0].asn,
+                                        trafficRedirect[0].target)
+
+                self.startRedirectTraffic(redirectRT, newRoute.nlri.rules)
+            else:
+                self.log.warning("FlowSpec action or multiple traffic redirect"
+                                 " actions not supported: %s",
+                                 newRoute.extendedCommunities())
         else:
+            prefix = entry
+
             if self.readvertise:
                 # check if this is a route we need to re-advertise
                 self.log.debug("route RTs: %s", newRoute.routeTargets)
@@ -294,10 +306,6 @@ class VRF(VPNInstance, LookingGlass):
                 if self._toReadvertise(newRoute):
                     self.log.debug("Need to re-advertise %s", prefix)
                     self._readvertise(newRoute)
-
-                    if self.attractTraffic:
-                        flowEntry = self._routeForRedirectPrefix(prefix)
-                        self._advertiseRoute(flowEntry)
 
             if not self._imported(newRoute):
                 self.log.debug("No need to setup dataplane for:%s",
@@ -324,38 +332,29 @@ class VRF(VPNInstance, LookingGlass):
     @logDecorator.log
     def _bestRouteRemoved(self, entry, oldRoute, last):
 
-        prefix = entry
-
         if isinstance(oldRoute.nlri, Flow):
-            #FIXME: check if there are multiple redirect RT
-            for ecom in oldRoute.extendedCommunities(TrafficRedirect):
-                redirectRT = "%s:%s" % (ecom.asn, ecom.target)
+            rule = entry
 
-                if self.redirectRT2flowNLRIs.get(redirectRT):
-                    # Remove redirection instance when last FlowSpec route for
-                    # this redirect route target
+            if len(oldRoute.extendedCommunities(TrafficRedirect)) == 1:
+                if last:
+                    trafficRedirect = oldRoute.extendedCommunities(
+                        TrafficRedirect)
+                    redirectRT = "%s:%s" % (trafficRedirect[0].asn,
+                                            trafficRedirect[0].target)
+
                     self.stopRedirectTraffic(redirectRT, oldRoute.nlri.rules)
-                    if len(self.redirectRT2flowNLRIs[redirectRT]) == 1:
-                        self.vpnManager.stopRedirectTrafficToVPN(
-                            self.externalInstanceId, self.type, redirectRT
-                        )
-                        del self.redirectRT2flowNLRIs[redirectRT]
-                    else:
-                        self.redirectRT2flowNLRIs[redirectRT].remove(oldRoute.nlri)
-                else:
-                    self.log.warning("Trying to remove best route for non "
-                                     "registered redirect route target %s",
-                                     redirectRT)
+            else:
+                self.log.warning("FlowSpec action or multiple traffic redirect"
+                                 " actions not supported: %s",
+                                 oldRoute.extendedCommunities())
         else:
+            prefix = entry
+
             if self.readvertise and last:
                 # check if this is a route we were re-advertising
                 if self._toReadvertise(oldRoute):
                     self.log.debug("Need to stop re-advertising %s", prefix)
                     self._readvertiseStop(oldRoute)
-
-                    if self.attractTraffic:
-                        flowEntry = self._routeForRedirectPrefix(prefix)
-                        self._withdrawRoute(flowEntry)
 
             if not self._imported(oldRoute):
                 self.log.debug("No need to update dataplane for:%s",
