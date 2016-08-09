@@ -273,7 +273,7 @@ class VRF(VPNInstance, LookingGlass):
         if isinstance(route.nlri, IPVPNNlri):
             return route.nlri.cidr.prefix()
         elif isinstance(route.nlri, Flow):
-            return (Flow, route.nlri.ordered_rules_str())
+            return (Flow, route.nlri._rules())
         else:
             self.log.error("We should not receive routes of type %s",
                            type(route.nlri))
