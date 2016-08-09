@@ -611,13 +611,12 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
         except Exception as e:
             self.log.error("Error in vifPlugged: %s", e)
             if localPort['linuxif'] in self.localPort2Endpoints:
-                if len(self.localPort2Endpoints[localPort['linuxif']]) > 1:
-                    endpoint = {'mac': macAddress, 'ip': ipAddressPrefix}
-                    if endpoint in self.localPort2Endpoints[localPort['linuxif']]:
-                        self.localPort2Endpoints[localPort['linuxif']].remove(
-                            endpoint
-                        )
-                else:
+                endpoint = {'mac': macAddress, 'ip': ipAddressPrefix}
+                if endpoint in self.localPort2Endpoints[localPort['linuxif']]:
+                    self.localPort2Endpoints[localPort['linuxif']].remove(
+                        endpoint
+                    )
+                if not self.localPort2Endpoints[localPort['linuxif']]:
                     del self.localPort2Endpoints[localPort['linuxif']]
             if macAddress in self.macAddress2LocalPortData:
                 del self.macAddress2LocalPortData[macAddress]
