@@ -395,7 +395,7 @@ class VPNInstance(TrackerWorker, Thread, LookingGlassLocalLogger):
     def hasEnpoint(self, linuxif):
         return (self.localPort2Endpoints.get(linuxif) is not None)
 
-    def hasOnlyOneEnpoint(self):
+    def hasOnlyOneEndpoint(self):
         return (len(self.localPort2Endpoints) == 1 and
                 len(self.localPort2Endpoints.values()[0]) == 1)
 
