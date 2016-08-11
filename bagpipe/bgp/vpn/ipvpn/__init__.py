@@ -205,7 +205,7 @@ class VRF(VPNInstance, LookingGlass):
                 self._advertiseRouteOrDefault(route, label, rd,
                                               lbConsistentHashOrder)
 
-        if self.attractTraffic and self.hasOnlyOneEnpoint():
+        if self.attractTraffic:
             flowEntry = self._routeForRedirectPrefix(nlri.cidr.prefix())
             self._advertiseRoute(flowEntry)
 
@@ -228,7 +228,7 @@ class VRF(VPNInstance, LookingGlass):
                 self._withdrawRouteOrDefault(route, label, rd,
                                              lbConsistentHashOrder)
 
-        if self.attractTraffic and self.hasOnlyOneEnpoint():
+        if self.attractTraffic:
             flowEntry = self._routeForRedirectPrefix(nlri.cidr.prefix())
             self._withdrawRoute(flowEntry)
 
@@ -247,20 +247,21 @@ class VRF(VPNInstance, LookingGlass):
             self._advertiseRouteOrDefault(route, label, rd,
                                           lbConsistentHashOrder)
 
-            if self.attractTraffic and self.hasOnlyOneEnpoint():
+            if self.attractTraffic:
                 flowEntry = self._routeForRedirectPrefix(route.nlri.cidr.prefix())
                 self._advertiseRoute(flowEntry)
 
-    def vifUnplugged(self, macAddress, ipAddressPrefix, advertiseSubnet,
-                     lbConsistentHashOrder):
+    def vifUnplugged(self, macAddress, ipAddressPrefix, advertiseSubnet):
         label = self.macAddress2LocalPortData[macAddress]['label']
+        lbConsistentHashOrder = self.macAddress2LocalPortData[macAddress]["lbConsistentHashOrder"]
         rd = self.endpoint2RD[(macAddress, ipAddressPrefix)]
         for route in self.readvertised:
             self.log.debug("Stop re-advertising %s with this port as next hop",
                            route.nlri)
-            self._withdrawRouteOrDefault(route, label, rd)
+            self._withdrawRouteOrDefault(route, label, rd,
+                                         lbConsistentHashOrder)
 
-            if self.attractTraffic and self.hasOnlyOneEnpoint():
+            if self.attractTraffic and self.hasOnlyOneEndpoint():
                 flowEntry = self._routeForRedirectPrefix(route.nlri.cidr.prefix())
                 self._withdrawRoute(flowEntry)
 
