@@ -259,9 +259,7 @@ class RESTAPI(LookingGlass):
                 detach_params['ip_address'],
                 detach_params['local_port'],
                 detach_params.get('advertise_subnet',
-                                  False),
-                detach_params.get('lb_consistent_hash_order',
-                                  0)
+                                  False)
             )
         except APIException as e:
             log.warning('detach_localport: API parameter error: %s', e)
