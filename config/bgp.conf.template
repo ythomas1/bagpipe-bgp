@@ -1,3 +1,9 @@
+[COMMON]
+# Root helper and root helper application
+#root_helper = sudo /usr/local/bin/oslo-rootwrap /etc/bagpipe-bgp/rootwrap.conf
+#root_helper_daemon = sudo /usr/local/bin/oslo-rootwrap-daemon /etc/bagpipe-bgp/rootwrap.conf
+
+
 [BGP]
 local_address=192.168.100.177
 peers=192.168.0.101
@@ -59,10 +65,6 @@ mpls_interface=*gre*
 # required for the MPLSOVSDataplaneDriver if used with the E-VPN LinuxVXLANHybridDataplaneDriver
 ovsbr_interfaces_mtu=4000
 
-# Root helper and root helper application
-#root_helper = sudo /usr/local/bin/bagpipe-bgp-rootwrap /etc/bagpipe-bgp/rootwrap.conf
-#root_helper_daemon = sudo /usr/local/bin/bagpipe-bgp-rootwrap-daemon /etc/bagpipe-bgp/rootwrap.conf
-
 
 [DATAPLANE_DRIVER_EVPN]
 # EVPN dataplane driver class
@@ -91,7 +93,3 @@ ovsbr_interfaces_mtu=4000
 # we will use to send)
 # Note: does not need to be specified if different than the BGP local_address
 #dataplane_local_address=1.2.3.4
-
-# Root helper and root helper application
-#root_helper = sudo /usr/local/bin/bagpipe-bgp-rootwrap /etc/bagpipe-bgp/rootwrap.conf
-#root_helper_daemon = sudo /usr/local/bin/bagpipe-bgp-rootwrap-daemon /etc/bagpipe-bgp/rootwrap.conf

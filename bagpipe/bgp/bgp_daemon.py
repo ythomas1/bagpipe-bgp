@@ -42,7 +42,8 @@ from bagpipe.bgp.vpn.ipvpn import IPVPN
 from bagpipe.bgp.vpn.evpn import EVPN
 
 
-def find_dataplane_drivers(dp_configs, bgp_config, is_cleaning_up=False):
+def find_dataplane_drivers(dp_configs, common_config, bgp_config,
+                           is_cleaning_up=False):
     drivers = dict()
     for vpn_type in dp_configs.iterkeys():
         dp_config = dp_configs[vpn_type]
@@ -57,6 +58,10 @@ def find_dataplane_drivers(dp_configs, bgp_config, is_cleaning_up=False):
 
         # FIXME: this is a hack, dataplane drivers should have a better way to
         #  access any item in the BGP dataplane_config
+        dp_config['root_helper'] = common_config.get("root_helper", "sudo")
+        dp_config['root_helper_daemon'] = (
+            common_config.get("root_helper_daemon")
+        )
         if 'dataplane_local_address' not in dp_config:
             dp_config['dataplane_local_address'] = bgp_config['local_address']
 
@@ -115,6 +120,9 @@ class BgpDaemon(lg.LookingGlassMixin):
         self.pidfile_path = '/var/run/bagpipe-bgp/bagpipe-bgp.pid'
         self.pidfile_timeout = 5
 
+        logging.info("BGP common configuration : %s", kwargs["common_config"])
+        self.common_config = kwargs["common_config"]
+
         logging.info("BGP manager configuration : %s", kwargs["bgp_config"])
         self.bgp_config = kwargs["bgp_config"]
 
@@ -132,6 +140,7 @@ class BgpDaemon(lg.LookingGlassMixin):
 
         logging.debug("Creating dataplane drivers")
         drivers = find_dataplane_drivers(self.dataplane_config,
+                                         self.common_config,
                                          self.bgp_config)
 
         for vpn_type in self.dataplane_config.iterkeys():
@@ -177,6 +186,7 @@ def _load_config(config_file):
         logging.error("Configuration file not found (%s)", config_file)
         exit()
 
+    common_config = parser.items("COMMON")
     bgp_config = parser.items("BGP")
 
     dataplane_config = dict()
@@ -198,7 +208,8 @@ def _load_config(config_file):
     api_config = parser.items("API")
     # TODO: add a default API config
 
-    config = {"bgp_config": dict(bgp_config),
+    config = {"common_config": dict(common_config),
+              "bgp_config": dict(bgp_config),
               "dataplane_config": dataplane_config,
               "api_config": dict(api_config)
               }
@@ -302,7 +313,8 @@ def cleanup_main():
     config = _load_config(options.config_file)
 
     drivers = find_dataplane_drivers(
-        config["dataplane_config"], config["bgp_config"], is_cleaning_up=True)
+        config["dataplane_config"], config["common_config"],
+        config["bgp_config"], is_cleaning_up=True)
     for (vpn_type, dataplane_driver) in drivers.iteritems():
         logging.info("Cleaning BGP component dataplane for %s...", vpn_type)
         dataplane_driver.reset_state()
